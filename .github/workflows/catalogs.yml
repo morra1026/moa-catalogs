@@ -32,6 +32,7 @@ jobs:
       - name: Publish static JSON files
         uses: cloudflare/wrangler-action@v3
         with:
+          wranglerVersion: '4.158.0'
           apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
           command: deploy --config catalog-service/wrangler.jsonc
