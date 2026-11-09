@@ -7,6 +7,32 @@ import { collectCatalog, publishedKinds } from './collect.mjs';
 export const digest = (text) => createHash('sha256').update(text).digest('hex');
 const count = (data) =>
   data.items.length || data.groups.reduce((sum, group) => sum + group.names.length, 0);
+export function encodeCatalog(kind, data) {
+  return JSON.stringify(
+    kind === 'fund'
+      ? {
+          ...data,
+          itemFormat: 'fund-tuples-v1',
+          items: data.items.map((item) => [item.name, item.symbol, item.aliases ?? '']),
+        }
+      : data,
+  );
+}
+export function decodeCatalog(kind, text) {
+  const data = JSON.parse(text);
+  if (data.itemFormat !== undefined) {
+    if (kind !== 'fund' || data.itemFormat !== 'fund-tuples-v1' || !Array.isArray(data.items))
+      throw new Error('배포 항목 형식 오류');
+    data.items = data.items.map((row) => {
+      if (!Array.isArray(row) || row.length !== 3 || row.some((part) => typeof part !== 'string'))
+        throw new Error('배포 펀드 항목 형식 오류');
+      const [name, symbol, aliases] = row;
+      return { kind: 'fund', name, symbol, market: 'FUND', currency: 'KRW', aliases };
+    });
+    delete data.itemFormat;
+  }
+  return data;
+}
 function validate(kind, data) {
   if (
     !data ||
@@ -65,7 +91,7 @@ export async function previousRelease(base, fetcher = fetch) {
     )
       throw new Error('기존 배포의 파일 또는 출처 오류');
     const text = await read(entry.file);
-    const data = JSON.parse(text);
+    const data = decodeCatalog(kind, text);
     validate(kind, data);
     if (digest(text) !== entry.revision || data.asOf !== entry.asOf || count(data) !== entry.count)
       throw new Error('기존 배포의 무결성 오류');
@@ -85,14 +111,14 @@ export async function buildRelease({ previous, loaders, now = new Date() }) {
       if (old && (data.asOf < old.asOf || count(data) < old.count * 0.8))
         throw new Error('원본 기준일 역행 또는 목록 개수 급감');
       // Collection time alone must not force every app to download an unchanged list.
-      const oldData = old && JSON.parse(files.get(old.file));
+      const oldData = old && decodeCatalog(kind, files.get(old.file));
       if (
         oldData &&
         JSON.stringify({ ...oldData, collectedAt: '' }) ===
           JSON.stringify({ ...data, collectedAt: '' })
       )
         continue;
-      const text = JSON.stringify(data);
+      const text = encodeCatalog(kind, data);
       if (Buffer.byteLength(text) > 24 * 1024 * 1024) throw new Error('배포 파일 크기 초과');
       const revision = digest(text);
       const file = `${kind}-${revision}.json`;

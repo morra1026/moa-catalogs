@@ -18,7 +18,7 @@ const definitions = {
   },
 };
 export const publishedKinds = Object.keys(definitions);
-const maxRows = 150000;
+const maxRows = 300000;
 const pageSize = 1000;
 const isoDay = (value) => `${value.slice(0, 4)}-${value.slice(4, 6)}-${value.slice(6, 8)}`;
 function requiredText(value, label, max = 200) {
@@ -36,14 +36,14 @@ export function normalizeServiceKey(key) {
     throw new Error('공공데이터 인증키 인코딩을 확인해 주세요.');
   }
 }
-async function page(definition, key, day, pageNo, fetcher) {
+async function page(definition, key, day, pageNo, fetcher, endDay) {
   const url = new URL(definition.endpoint);
   for (const [name, value] of Object.entries({
     [definition.keyParam]: key,
     resultType: 'json',
-    numOfRows: String(pageSize),
+    numOfRows: String(endDay ? 10000 : pageSize),
     pageNo: String(pageNo),
-    basDt: day,
+    ...(endDay ? { endBasDt: endDay } : { basDt: day }),
   }))
     url.searchParams.set(name, value);
   let response;
@@ -76,7 +76,11 @@ async function page(definition, key, day, pageNo, fetcher) {
   const item = body.items?.item;
   const rows = item ? (Array.isArray(item) ? item : [item]) : [];
   if (
-    rows.some((row) => row?.basDt !== day) ||
+    rows.some((row) =>
+      endDay
+        ? typeof row?.basDt !== 'string' || !/^\d{8}$/.test(row.basDt) || row.basDt >= endDay
+        : row?.basDt !== day,
+    ) ||
     (total > 0 && !rows.length) ||
     (!total && rows.length)
   )
@@ -171,6 +175,37 @@ export async function collectCatalog(
   if (!definition) throw new Error('지원하지 않는 공공 목록');
   const key = normalizeServiceKey(serviceKey);
   const koreanDay = new Date(now.getTime() + 9 * 3600000).toISOString().slice(0, 10);
+  if (kind === 'fund') {
+    // basDt filters each code's last update, not a complete daily snapshot.
+    // Read the whole registry, bounded by tomorrow's exclusive date.
+    const endDay = new Date(Date.parse(`${koreanDay}T00:00:00Z`) + 86400000)
+      .toISOString()
+      .slice(0, 10)
+      .replaceAll('-', '');
+    const first = await page(definition, key, undefined, 1, fetcher, endDay);
+    const rows = [...first.rows];
+    const seenPages = new Set([JSON.stringify(first.rows)]);
+    for (let pageNo = 2; rows.length < first.total; pageNo++) {
+      if (pageNo > 1000) throw new Error('공공 API 페이지 한도 초과');
+      const next = await page(definition, key, undefined, pageNo, fetcher, endDay);
+      const signature = JSON.stringify(next.rows);
+      if (next.total !== first.total || seenPages.has(signature))
+        throw new Error('공공 API 페이지가 반복되거나 전체 개수가 변경되었습니다.');
+      seenPages.add(signature);
+      rows.push(...next.rows);
+    }
+    if (
+      rows.length !== first.total ||
+      rows.length < definition.minimum ||
+      new Set(rows.map((row) => row.asoStdCd)).size !== rows.length
+    )
+      throw new Error('펀드 전체 목록이 불완전하거나 코드가 중복되었습니다.');
+    const check = await page(definition, key, undefined, 1, fetcher, endDay);
+    if (check.total !== first.total || JSON.stringify(check.rows) !== JSON.stringify(first.rows))
+      throw new Error('수집 도중 펀드 원본이 변경되었습니다.');
+    const latest = rows.reduce((day, row) => (row.basDt > day ? row.basDt : day), '');
+    return transformRows(kind, rows, latest, now.toISOString());
+  }
   for (let offset = 1; offset <= lookback; offset++) {
     const day = new Date(Date.parse(`${koreanDay}T00:00:00Z`) - offset * 86400000)
       .toISOString()
