@@ -1,5 +1,35 @@
 // Runs in Node on the scheduled runner only. Never imported by the Expo app.
 // API contracts: data.go.kr/data/15043232/openapi.do and /15094792/openapi.do.
+import { setTimeout as delay } from 'node:timers/promises';
+// Only messages constructed here are safe for public workflow diagnostics.
+export class CollectionError extends Error {}
+
+async function requestJson(url, fetcher) {
+  let failure = '공공 API 연결 실패';
+  for (let attempt = 0; attempt < 3; attempt++) {
+    try {
+      const response = await fetcher(url, { signal: AbortSignal.timeout(55000) });
+      if (!response.ok) {
+        failure = `공공 API HTTP ${response.status}`;
+        if (response.status !== 429 && response.status < 500) throw new CollectionError(failure);
+        await response.body?.cancel();
+      } else {
+        try {
+          return await response.json();
+        } catch (error) {
+          if (error instanceof SyntaxError) throw new CollectionError('공공 API JSON 응답 오류');
+          failure = '공공 API 응답 수신 실패';
+        }
+      }
+    } catch (error) {
+      if (error instanceof CollectionError) throw error;
+      // Fetch errors may contain the authenticated URL. Never log or propagate them.
+      failure = '공공 API 연결 실패';
+    }
+    if (attempt < 2) await delay(500 * (attempt + 1));
+  }
+  throw new CollectionError(failure);
+}
 const definitions = {
   institutions: {
     endpoint: 'https://apis.data.go.kr/1160100/service/GetFnCoBasiInfoService/getFnCoOutl',
@@ -23,17 +53,17 @@ const pageSize = 1000;
 const isoDay = (value) => `${value.slice(0, 4)}-${value.slice(4, 6)}-${value.slice(6, 8)}`;
 function requiredText(value, label, max = 200) {
   if (typeof value !== 'string' || !value.trim() || value.length > max)
-    throw new Error(`${label}: 원본 필드 형식 오류`);
+    throw new CollectionError(`${label}: 원본 필드 형식 오류`);
   return value.trim();
 }
 export function normalizeServiceKey(key) {
-  if (!key?.trim()) throw new Error('DATA_GO_KR_SERVICE_KEY 설정이 필요합니다.');
+  if (!key?.trim()) throw new CollectionError('DATA_GO_KR_SERVICE_KEY 설정이 필요합니다.');
   // The portal displays both encoded and decoded keys. Decode percent escapes once,
   // then URLSearchParams performs the request encoding. Never interpret + as a space.
   try {
     return key.includes('%') ? decodeURIComponent(key.trim()) : key.trim();
   } catch {
-    throw new Error('공공데이터 인증키 인코딩을 확인해 주세요.');
+    throw new CollectionError('공공데이터 인증키 인코딩을 확인해 주세요.');
   }
 }
 async function page(definition, key, day, pageNo, fetcher, endDay) {
@@ -46,33 +76,20 @@ async function page(definition, key, day, pageNo, fetcher, endDay) {
     ...(endDay ? { endBasDt: endDay } : { basDt: day }),
   }))
     url.searchParams.set(name, value);
-  let response;
-  try {
-    response = await fetcher(url, { signal: AbortSignal.timeout(55000) });
-  } catch {
-    // Fetch exceptions may contain the authenticated URL. Do not propagate them.
-    throw new Error('공공 API 연결 실패');
-  }
-  if (!response.ok) throw new Error(`공공 API HTTP ${response.status}`);
-  let value;
-  try {
-    value = await response.json();
-  } catch {
-    throw new Error('공공 API JSON 응답 오류');
-  }
+  const value = await requestJson(url, fetcher);
   const result = value?.response;
   if (String(result?.header?.resultCode) !== '00')
-    throw new Error('공공 API 인증 또는 응답 오류: 활용신청·한도를 확인하세요.');
+    throw new CollectionError('공공 API 인증 또는 응답 오류: 활용신청·한도를 확인하세요.');
   const body = result.body;
   const total = Number(body?.totalCount);
   if (!Number.isSafeInteger(total) || total < 0 || total > maxRows)
-    throw new Error('공공 API 전체 개수 오류');
+    throw new CollectionError('공공 API 전체 개수 오류');
   if (
     Number(body.pageNo) !== pageNo ||
     !Number.isInteger(Number(body.numOfRows)) ||
     Number(body.numOfRows) < 1
   )
-    throw new Error('공공 API 페이지 정보 오류');
+    throw new CollectionError('공공 API 페이지 정보 오류');
   const item = body.items?.item;
   const rows = item ? (Array.isArray(item) ? item : [item]) : [];
   if (
@@ -84,7 +101,7 @@ async function page(definition, key, day, pageNo, fetcher, endDay) {
     (total > 0 && !rows.length) ||
     (!total && rows.length)
   )
-    throw new Error('공공 API 기준일 또는 페이지 내용 오류');
+    throw new CollectionError('공공 API 기준일 또는 페이지 내용 오류');
   return { total, rows };
 }
 
@@ -100,7 +117,8 @@ const institutionAliases = {
 };
 export function transformRows(kind, rows, day, collectedAt) {
   const definition = definitions[kind];
-  if (!definition) throw new Error('재배포 허용을 확인한 공공 목록만 수집할 수 있습니다.');
+  if (!definition)
+    throw new CollectionError('재배포 허용을 확인한 공공 목록만 수집할 수 있습니다.');
   const common = {
     asOf: isoDay(day),
     asOfKind: 'source',
@@ -112,11 +130,11 @@ export function transformRows(kind, rows, day, collectedAt) {
     const byCode = new Map();
     for (const row of rows) {
       const symbol = requiredText(row.asoStdCd, '협회표준코드', 30);
-      if (!/^[A-Za-z0-9]+$/.test(symbol)) throw new Error('펀드 표준코드 형식 오류');
+      if (!/^[A-Za-z0-9]+$/.test(symbol)) throw new CollectionError('펀드 표준코드 형식 오류');
       const name = requiredText(row.fndNm, '펀드명');
       const previous = byCode.get(symbol);
       if (previous && previous.name !== name)
-        throw new Error('펀드 코드에 서로 다른 이름이 있습니다.');
+        throw new CollectionError('펀드 코드에 서로 다른 이름이 있습니다.');
       byCode.set(symbol, {
         kind: 'fund',
         name,
@@ -172,7 +190,7 @@ export async function collectCatalog(
   { fetcher = fetch, now = new Date(), lookback = 14 } = {},
 ) {
   const definition = definitions[kind];
-  if (!definition) throw new Error('지원하지 않는 공공 목록');
+  if (!definition) throw new CollectionError('지원하지 않는 공공 목록');
   const key = normalizeServiceKey(serviceKey);
   const koreanDay = new Date(now.getTime() + 9 * 3600000).toISOString().slice(0, 10);
   if (kind === 'fund') {
@@ -186,11 +204,11 @@ export async function collectCatalog(
     const rows = [...first.rows];
     const seenPages = new Set([JSON.stringify(first.rows)]);
     for (let pageNo = 2; rows.length < first.total; pageNo++) {
-      if (pageNo > 1000) throw new Error('공공 API 페이지 한도 초과');
+      if (pageNo > 1000) throw new CollectionError('공공 API 페이지 한도 초과');
       const next = await page(definition, key, undefined, pageNo, fetcher, endDay);
       const signature = JSON.stringify(next.rows);
       if (next.total !== first.total || seenPages.has(signature))
-        throw new Error('공공 API 페이지가 반복되거나 전체 개수가 변경되었습니다.');
+        throw new CollectionError('공공 API 페이지가 반복되거나 전체 개수가 변경되었습니다.');
       seenPages.add(signature);
       rows.push(...next.rows);
     }
@@ -199,10 +217,10 @@ export async function collectCatalog(
       rows.length < definition.minimum ||
       new Set(rows.map((row) => row.asoStdCd)).size !== rows.length
     )
-      throw new Error('펀드 전체 목록이 불완전하거나 코드가 중복되었습니다.');
+      throw new CollectionError('펀드 전체 목록이 불완전하거나 코드가 중복되었습니다.');
     const check = await page(definition, key, undefined, 1, fetcher, endDay);
     if (check.total !== first.total || JSON.stringify(check.rows) !== JSON.stringify(first.rows))
-      throw new Error('수집 도중 펀드 원본이 변경되었습니다.');
+      throw new CollectionError('수집 도중 펀드 원본이 변경되었습니다.');
     const latest = rows.reduce((day, row) => (row.basDt > day ? row.basDt : day), '');
     return transformRows(kind, rows, latest, now.toISOString());
   }
@@ -216,17 +234,17 @@ export async function collectCatalog(
     const rows = [...first.rows];
     const seen = new Set([JSON.stringify(first.rows)]);
     for (let pageNo = 2; rows.length < first.total; pageNo++) {
-      if (pageNo > 1000) throw new Error('공공 API 페이지 한도 초과');
+      if (pageNo > 1000) throw new CollectionError('공공 API 페이지 한도 초과');
       const next = await page(definition, key, day, pageNo, fetcher);
       const signature = JSON.stringify(next.rows);
       if (next.total !== first.total || seen.has(signature))
-        throw new Error('공공 API 페이지가 반복되거나 전체 개수가 변경되었습니다.');
+        throw new CollectionError('공공 API 페이지가 반복되거나 전체 개수가 변경되었습니다.');
       seen.add(signature);
       rows.push(...next.rows);
     }
     if (rows.length !== first.total || rows.length < definition.minimum)
-      throw new Error('공공 목록이 불완전합니다.');
+      throw new CollectionError('공공 목록이 불완전합니다.');
     return transformRows(kind, rows, day, now.toISOString());
   }
-  throw new Error('최근 14일의 원본 목록을 찾지 못했습니다.');
+  throw new CollectionError('최근 14일의 원본 목록을 찾지 못했습니다.');
 }

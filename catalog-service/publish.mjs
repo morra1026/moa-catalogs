@@ -2,7 +2,7 @@ import { createHash } from 'node:crypto';
 import { mkdir, writeFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
-import { collectCatalog, publishedKinds } from './collect.mjs';
+import { CollectionError, collectCatalog, publishedKinds } from './collect.mjs';
 
 export const digest = (text) => createHash('sha256').update(text).digest('hex');
 const count = (data) =>
@@ -103,6 +103,7 @@ export async function buildRelease({ previous, loaders, now = new Date() }) {
   const catalogs = { ...previous.manifest.catalogs };
   const files = new Map(previous.files);
   const failures = [];
+  const failureReasons = {};
   for (const kind of publishedKinds) {
     try {
       const data = await loaders[kind]();
@@ -124,15 +125,21 @@ export async function buildRelease({ previous, loaders, now = new Date() }) {
       const file = `${kind}-${revision}.json`;
       files.set(file, text);
       catalogs[kind] = { revision, file, count: count(data), asOf: data.asOf };
-    } catch {
+    } catch (error) {
       // Only fixed messages leave the collector. No API response or authenticated URL
       // can accidentally reach a public manifest, workflow log or Actions summary.
       failures.push(kind);
+      failureReasons[kind] = error instanceof CollectionError ? error.message : '목록 검증 실패';
     }
   }
   if (!Object.keys(catalogs).length)
     throw new Error('배포 가능한 목록이 없습니다. 인증키와 활용신청을 확인하세요.');
-  return { manifest: { version: 1, generatedAt: now.toISOString(), catalogs }, files, failures };
+  return {
+    manifest: { version: 1, generatedAt: now.toISOString(), catalogs },
+    files,
+    failures,
+    failureReasons,
+  };
 }
 async function main() {
   if (!process.env.CATALOG_BASE_URL && process.env.CATALOG_BOOTSTRAP !== '1')
@@ -165,12 +172,13 @@ async function main() {
   // reports partial failure without sacrificing the last working list.
   await writeFile(
     resolve('catalog-service/report.json'),
-    JSON.stringify({ failures: result.failures }),
+    JSON.stringify({ failures: result.failures, failureReasons: result.failureReasons }),
   );
   console.log(
     JSON.stringify({
       published: Object.keys(result.manifest.catalogs),
       retainedAfterFailure: result.failures,
+      failureReasons: result.failureReasons,
     }),
   );
 }
