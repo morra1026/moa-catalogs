@@ -1,0 +1,47 @@
+name: Publish public reference catalogs
+on:
+  schedule:
+    # KST 15:17, after the FSC's next-business-day 13:00 publication window.
+    - cron: '17 6 * * *'
+  workflow_dispatch:
+    inputs:
+      bootstrap:
+        description: 'First deployment only: no prior catalog URL exists yet'
+        type: boolean
+        default: false
+permissions:
+  contents: read
+concurrency:
+  group: public-reference-catalogs
+  cancel-in-progress: false
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - name: Collect approved public lists and retain previous snapshots on failure
+        run: node catalog-service/publish.mjs
+        env:
+          DATA_GO_KR_SERVICE_KEY: ${{ secrets.DATA_GO_KR_SERVICE_KEY }}
+          CATALOG_BASE_URL: ${{ vars.CATALOG_BASE_URL }}
+          CATALOG_BOOTSTRAP: ${{ inputs.bootstrap && '1' || '0' }}
+      - name: Publish static JSON files
+        uses: cloudflare/wrangler-action@v3
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          command: deploy --config catalog-service/wrangler.jsonc
+      - name: Report any retained lists
+        run: |
+          node --input-type=module <<'NODE'
+          import { readFileSync } from 'node:fs';
+          const { failures } = JSON.parse(readFileSync('catalog-service/report.json', 'utf8'));
+          if (failures.length) {
+            console.error(`Collection failed for: ${failures.join(', ')}. Previous snapshots were retained where available.`);
+            process.exitCode = 1;
+          }
+          NODE

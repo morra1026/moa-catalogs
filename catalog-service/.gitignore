@@ -1,0 +1,4 @@
+/public/
+/report.json
+/.wrangler/
+.env*
