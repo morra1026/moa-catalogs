@@ -167,19 +167,21 @@ export function transformRows(kind, rows, day, collectedAt) {
     '산림조합',
   ])
     names.add(name);
-  const groups = ['은행', '증권사', '상호금융', '기타 금융회사'].map((label) => ({
+  const groups = ['은행', '저축은행', '증권사', '상호금융', '기타 금융회사'].map((label) => ({
     label,
     names: [],
   }));
   for (const name of [...names].sort((a, b) => a.localeCompare(b, 'ko'))) {
-    const index = /은행|뱅크|우체국/.test(name)
-      ? 0
-      : /증권|금융투자/.test(name)
-        ? 1
-        : /농축협|새마을금고|신협|수협중앙회|산림조합/.test(name)
-          ? 2
-          : 3;
-    groups[index].names.push(name);
+    const label = /저축\s*은행/.test(name)
+      ? '저축은행'
+      : /은행|뱅크|우체국/.test(name)
+        ? '은행'
+        : /증권|금융투자/.test(name)
+          ? '증권사'
+          : /농축협|새마을금고|신협|수협중앙회|산림조합/.test(name)
+            ? '상호금융'
+            : '기타 금융회사';
+    groups.find((group) => group.label === label).names.push(name);
   }
   return { ...common, items: [], groups };
 }
